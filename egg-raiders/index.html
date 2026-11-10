@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Egg Raiders</title>
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;overflow:hidden;background:#3f8f55;font-family:system-ui,sans-serif;color:#1c2333;user-select:none;-webkit-user-select:none;touch-action:none}
+canvas{position:fixed;inset:0;width:100%;height:100%}
+.ui{position:fixed;z-index:2}
+.box,button{background:#fffaf0;border:3px solid #1c2333;border-radius:12px;padding:6px 12px;font:800 15px system-ui,sans-serif;color:#1c2333}
+button{cursor:pointer}button:disabled{opacity:.45}
+#cash{top:10px;left:10px}
+#menuBtn{top:10px;right:10px}
+#msg{top:58px;left:50%;transform:translateX(-50%);background:#1c2333;color:#fff;display:none;max-width:92vw;text-align:center}
+#act{right:14px;bottom:16px;min-width:150px;min-height:56px;background:#ffd166}
+#swat{right:14px;bottom:84px;min-height:48px;background:#ff9d9a}
+#menu{inset:0;background:rgba(20,26,40,.6);display:none;align-items:center;justify-content:center;padding:12px;z-index:3}
+#sheet{background:#fffaf0;border:4px solid #1c2333;border-radius:18px;width:min(520px,100%);max-height:90vh;overflow:auto;padding:14px;touch-action:pan-y}
+#sheet h3{margin:12px 0 6px}#sheet p{margin:4px 0;font-size:14px}
+.row{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #e4d9c3;font-size:14px}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="cash" class="ui box"></div>
+<button id="menuBtn" class="ui">Menu</button>
+<div id="msg" class="ui box"></div>
+<button id="swat" class="ui">Swat</button>
+<button id="act" class="ui" disabled>—</button>
+<div id="menu" class="ui"><div id="sheet"></div></div>
+<script>
+"use strict";
+// Egg Raiders: buy eggs off the belt, nest them for income, raid rival nests, defend your own.
+const $=id=>document.getElementById(id), cv=$('c'), ctx=cv.getContext('2d');
+const W=1600,H=900,BY=450,BW=520,BH=260,PI=2,KEY='eggraiders1';
+// name, price, income/sec, colour, rarity
+const TYPES=[['Chalk Egg',25,1,'#d8d2c4',0],['Fern Egg',120,4,'#8fcf7a',0],['Clay Egg',500,14,'#d98a5f',1],['Tide Egg',2500,60,'#5fb3e6',1],
+ ['Cinder Egg',12000,250,'#ff8a3d',2],['Glacier Egg',70000,1200,'#bfeaff',2],['Thunder Egg',450000,6500,'#8d7bff',3],['Nebula Egg',4e6,50000,'#ff5fb0',4]];
+const RAR=['Common','Uncommon','Rare','Epic','Legendary'];
+const MUT=[['',1,null],['Gold ',2,'#ffd23f'],['Diamond ',5,'#7ae7ff']];
+const UPG={speed:['Sneakers: +10% speed',200,2.5,6],shield:['Dome: +5s duration',400,2.5,5],luck:['Luck: rarer eggs, more mutations',1000,3,6]};
+const fmt=n=>{n=Math.floor(n);const u=['','K','M','B','T'];let i=0;while(n>=1000&&i<4){n/=1000;i++}return(i&&n<100?n.toFixed(1):Math.floor(n))+u[i]};
+const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y), rnd=(a,b)=>a+Math.random()*(b-a), clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+
+const bases=[[300,160],[1300,160],[300,740],[1300,740]].map(([cx,cy],i)=>({i,cx,cy,x:cx,y:cy,eggs:Array(8).fill(null),shield:0,cd:0,pad:{x:cx+(cx<800?330:-330),y:cy}}));
+const NAMES=[['Rook','#e2504c'],['Juno','#3d8bff'],['You','#ffcf33'],['Bix','#a04dff']];
+const ents=bases.map(b=>({name:NAMES[b.i][0],col:NAMES[b.i][1],x:b.cx,y:b.cy,home:b.i,cash:50,carry:null,stun:0,cd:0,bot:b.i!==PI,st:'idle',t:rnd(1,4)}));
+const P=ents[PI], belt=[];
+let reb=0, upg={speed:0,shield:0,luck:0}, seen={}, grabbing=null, beltT=0, saveT=0, now=0;
+
+try{const s=JSON.parse(localStorage.getItem(KEY));if(s){P.cash=s.cash;reb=s.reb;Object.assign(upg,s.upg);seen=s.seen;s.eggs.forEach((e,i)=>bases[PI].eggs[i]=e)}}catch(e){}
+function save(){try{localStorage.setItem(KEY,JSON.stringify({cash:P.cash,reb,upg,seen,eggs:bases[PI].eggs}))}catch(e){}}
+ents.forEach(e=>{if(e.bot)bases[e.home].eggs[0]={t:0,m:0}});
+
+const slot=(b,s)=>({x:b.cx+(s%4-1.5)*115,y:b.cy+(s<4?-55:55)});
+const inc=e=>TYPES[e.t][2]*MUT[e.m][1];
+const price=e=>TYPES[e.t][1]*MUT[e.m][1];
+const name=e=>MUT[e.m][0]+TYPES[e.t][0];
+const mult=b=>b.i===PI?1+.5*reb:1;
+const income=b=>b.eggs.reduce((a,e)=>a+(e?inc(e):0),0)*mult(b);
+const inside=(b,p,pad)=>Math.abs(p.x-b.cx)<BW/2+pad&&Math.abs(p.y-b.cy)<BH/2+pad;
+const upCost=k=>Math.round(UPG[k][1]*UPG[k][2]**upg[k]), rebCost=()=>20000*12**reb;
+
+let msgTimer;
+function say(t){const m=$('msg');m.textContent=t;m.style.display='block';clearTimeout(msgTimer);msgTimer=setTimeout(()=>m.style.display='none',2800)}
+
+function spawnEgg(){
+  const luck=upg.luck+reb, b=Math.max(1.6,2.6-.12*luck); let r=Math.random()*TYPES.reduce((a,_,i)=>a+b**-i,0), t=0;
+  while(t<TYPES.length-1&&(r-=b**-t)>0)t++;
+  const k=1+.25*luck, q=Math.random(); belt.push({t,m:q<.015*k?2:q<.095*k?1:0,x:40});
+}
+// Put a carried egg in the carrier's nest. A full nest swaps out its weakest egg (refunded at half price).
+function place(e){
+  const b=bases[e.home], egg=e.carry.egg; let s=b.eggs.indexOf(null); e.carry=null;
+  if(s<0){s=0;b.eggs.forEach((x,i)=>{if(inc(x)<inc(b.eggs[s]))s=i});
+    if(inc(egg)<=inc(b.eggs[s])){e.cash+=price(egg)/2;if(e===P)say('Nest full: sold '+name(egg)+' for $'+fmt(price(egg)/2));return}
+    e.cash+=price(b.eggs[s])/2}
+  b.eggs[s]=egg; if(e===P){seen[egg.t+'_'+egg.m]=1;say('Nested '+name(egg)+' (+$'+fmt(inc(egg)*mult(b))+'/s)')}
+}
+function grab(e,b,s){e.carry={egg:b.eggs[s],from:b.i};b.eggs[s]=null}
+// A swatted thief's egg goes back to its owner (if the owner has room).
+function giveBack(e){
+  const c=e.carry; if(!c||c.from==null)return; const b=bases[c.from], s=b.eggs.indexOf(null); if(s<0)return;
+  b.eggs[s]=c.egg;e.carry=null; if(b.i===PI)say('Got your '+name(c.egg)+' back!'); if(e===P)say('Caught! The egg went back.');
+}
+function swat(a){
+  a.cd=1;a.swing=now;
+  for(const e of ents){if(e===a||dist(a,e)>75||(a.bot&&e.bot))continue;
+    e.stun=1.2;giveBack(e);if(e===P)grabbing=null;else e.st='home'}
+}
+function raise(b){const d=b.i===PI?20+5*upg.shield:18;b.shield=d;b.cd=d+40}
+
+// What the action button does right now, or null.
+function context(){
+  if(P.stun>0||P.carry||grabbing)return null;
+  const g=belt.find(g=>dist(P,{x:g.x,y:BY})<85);
+  if(g)return{text:'Buy '+name(g)+' $'+fmt(price(g)),ok:P.cash>=price(g),run(){P.cash-=price(g);belt.splice(belt.indexOf(g),1);P.carry={egg:{t:g.t,m:g.m}}}};
+  for(const b of bases)if(b.i!==PI&&b.shield<=0)for(let s=0;s<8;s++)
+    if(b.eggs[s]&&dist(P,slot(b,s))<60)return{text:'Steal '+name(b.eggs[s]),ok:true,run(){grabbing={b,s,t:0}}};
+  return null;
+}
+function act(){const c=context();if(c&&c.ok)c.run()}
+function buyUpg(k){if(upg[k]>=UPG[k][3]||P.cash<upCost(k))return false;P.cash-=upCost(k);upg[k]++;return true}
+function rebirth(){if(P.cash<rebCost())return false;reb++;P.cash=50;bases[PI].eggs.fill(null);P.carry=null;say('Rebirth '+reb+': income x'+(1+.5*reb));return true}
+
+function go(e,p,sp,dt){const d=dist(e,p);if(d<10)return true;e.x+=(p.x-e.x)/d*sp*dt;e.y+=(p.y-e.y)/d*sp*dt;return false}
+function plan(e){
+  const b=bases[e.home], opts=[];
+  for(const o of bases)if(o!==b&&o.shield<=0)o.eggs.forEach((x,s)=>{if(x)opts.push({o,s,v:inc(x)})});
+  if(opts.length&&Math.random()<.35){const p=opts.sort((a,c)=>c.v-a.v)[Math.floor(Math.random()*Math.min(3,opts.length))];e.st='steal';e.tb=p.o;e.ts=p.s;e.t=1.5;e.warned=false}
+  else{e.st='belt';e.tx=clamp(b.cx+rnd(-250,250),100,W-100);e.t=8;if(b.cd<=0&&Math.random()<.35)raise(b)}
+}
+function bot(e,dt){
+  const b=bases[e.home], sp=e.carry?165:185;
+  const thief=!e.carry&&ents.find(o=>o.carry&&o.carry.from===e.home&&dist(e,o)<500);
+  if(thief){if(dist(e,thief)<55){if(e.cd<=0)swat(e)}else go(e,thief,175,dt);e.st='home';return}
+  if(e.st==='idle'){if((e.t-=dt)<=0)plan(e)}
+  else if(e.st==='belt'){
+    let g=null;for(const x of belt)if(Math.abs(x.x-e.x)<300&&price(x)<=e.cash&&(!g||price(x)>price(g)))g=x;
+    if(g){if(go(e,{x:g.x+25,y:BY},sp,dt)||dist(e,{x:g.x,y:BY})<35){e.cash-=price(g);belt.splice(belt.indexOf(g),1);e.carry={egg:{t:g.t,m:g.m}};e.st='home'}}
+    else{go(e,{x:e.tx,y:BY+(b.cy<BY?-50:50)},sp,dt);if((e.t-=dt)<=0)e.st='home'}
+  }else if(e.st==='steal'){
+    const tb=e.tb;
+    if(tb.shield>0||!tb.eggs[e.ts])e.st='home';
+    else if(go(e,slot(tb,e.ts),sp,dt)){
+      if(!e.warned&&tb.i===PI){e.warned=true;say(e.name+' is stealing your '+name(tb.eggs[e.ts])+'! Swat them!')}
+      if((e.t-=dt)<=0){grab(e,tb,e.ts);e.st='home'}}
+  }else if(go(e,b,sp,dt)){if(e.carry)place(e);e.st='idle';e.t=rnd(2,5)}
+}
+
+const keys={}; let drag=null;
+function step(dt){
+  now+=dt;
+  if((beltT-=dt)<=0){beltT=2;spawnEgg()}
+  for(let i=belt.length-1;i>=0;i--){belt[i].x+=60*dt;if(belt[i].x>W-40)belt.splice(i,1)}
+  for(const b of bases){
+    b.shield-=dt;b.cd-=dt;ents[b.i].cash+=income(b)*dt;
+    if(b.shield>0)for(const e of ents)if(e.home!==b.i&&inside(b,e,20)){ // push intruders out the nearest side
+      const dx=BW/2+20-Math.abs(e.x-b.cx), dy=BH/2+20-Math.abs(e.y-b.cy);
+      if(dx<dy)e.x+=Math.sign(e.x-b.cx||1)*dx;else e.y+=Math.sign(e.y-b.cy||1)*dy;
+      if(e===P)grabbing=null}
+  }
+  for(const e of ents){e.stun-=dt;e.cd-=dt;if(e.bot&&e.stun<=0)bot(e,dt)}
+  if(P.stun<=0){
+    let dx=(keys.d||keys.arrowright?1:0)-(keys.a||keys.arrowleft?1:0), dy=(keys.s||keys.arrowdown?1:0)-(keys.w||keys.arrowup?1:0);
+    if(drag){dx=drag.dx;dy=drag.dy}
+    const m=Math.hypot(dx,dy);
+    if(m>.2){const sp=230*(1+.1*upg.speed)*(P.carry?.85:1);P.x+=dx/m*sp*dt;P.y+=dy/m*sp*dt}
+  }
+  for(const e of ents){e.x=clamp(e.x,20,W-20);e.y=clamp(e.y,20,H-20)}
+  const home=bases[PI];
+  if(P.carry&&inside(home,P,-20))place(P);
+  if(home.cd<=0&&dist(P,home.pad)<45){raise(home);say('Dome up!')}
+  if(grabbing){const g=grabbing;
+    if(!g.b.eggs[g.s]||dist(P,slot(g.b,g.s))>75||P.stun>0)grabbing=null;
+    else if((g.t+=dt)>=1){grab(P,g.b,g.s);grabbing=null;say('Got it. Run home!')}}
+  if((saveT+=dt)>5){saveT=0;save()}
+}
+
+// ---------- input ----------
+addEventListener('keydown',e=>{const k=e.key.toLowerCase();keys[k]=1;if(k==='e')act();if(k===' '){e.preventDefault();trySwat()}if(k==='m'||k==='escape')toggleMenu(k==='m'&&!menuOpen)});
+addEventListener('keyup',e=>keys[e.key.toLowerCase()]=0);
+function trySwat(){if(P.cd<=0&&P.stun<=0)swat(P)}
+$('act').onclick=act; $('swat').onclick=trySwat;
+cv.addEventListener('pointerdown',e=>{if(e.pointerType!=='mouse')drag={id:e.pointerId,x:e.clientX,y:e.clientY,dx:0,dy:0}});
+addEventListener('pointermove',e=>{if(drag&&e.pointerId===drag.id){drag.dx=e.clientX-drag.x;drag.dy=e.clientY-drag.y}});
+const endDrag=e=>{if(drag&&e.pointerId===drag.id)drag=null};
+addEventListener('pointerup',endDrag);addEventListener('pointercancel',endDrag);
+
+// ---------- menu ----------
+let menuOpen=false;
+function toggleMenu(open){menuOpen=open;$('menu').style.display=open?'flex':'none';if(open)renderMenu()}
+$('menuBtn').onclick=()=>toggleMenu(true);
+$('menu').onclick=e=>{if(e.target.id==='menu')toggleMenu(false)};
+function renderMenu(){
+  let h='<button id="x" style="float:right">Close</button><h3 style="margin-top:0">Egg Raiders</h3>'+
+   '<p>Move: WASD / arrows, or drag on touch. <b>E</b>: buy from the belt or steal from a rival nest. <b>Space</b>: swat thieves so they drop your egg. Step on your blue pad to raise a dome. Carry eggs into your nest to place them.</p>'+
+   '<h3>Upgrades — $'+fmt(P.cash)+'</h3>';
+  for(const k in UPG){const max=upg[k]>=UPG[k][3];h+=`<div class="row"><span>${UPG[k][0]} (${upg[k]}/${UPG[k][3]})</span><button data-u="${k}" ${max||P.cash<upCost(k)?'disabled':''}>${max?'MAX':'$'+fmt(upCost(k))}</button></div>`}
+  h+=`<h3>Rebirth ${reb}</h3><div class="row"><span>Reset cash and eggs for +50% income and better luck. Keeps upgrades.</span><button id="rb" ${P.cash<rebCost()?'disabled':''}>$${fmt(rebCost())}</button></div><h3>Egg index</h3>`;
+  TYPES.forEach((t,i)=>{h+=`<div class="row"><span><b style="color:${t[3]};-webkit-text-stroke:.5px #1c2333">⬮</b> ${t[0]} · ${RAR[t[4]]} · $${fmt(t[1])} · +$${fmt(t[2])}/s</span><span>${MUT.map((m,j)=>seen[i+'_'+j]?'✅':'▫️').join('')}</span></div>`});
+  h+='<p>Columns: normal, Gold (x2), Diamond (x5).</p>';
+  $('sheet').innerHTML=h; $('x').onclick=()=>toggleMenu(false); $('rb').onclick=()=>{if(rebirth())toggleMenu(false)};
+  $('sheet').querySelectorAll('[data-u]').forEach(b=>b.onclick=()=>{buyUpg(b.dataset.u);renderMenu()});
+}
+
+// ---------- drawing ----------
+function egg(x,y,r,e){
+  const [, , ,col]=TYPES[e.t], glow=MUT[e.m][2];
+  ctx.save();if(glow){ctx.shadowColor=glow;ctx.shadowBlur=18}
+  ctx.fillStyle=col;ctx.strokeStyle=glow||'#1c2333';ctx.lineWidth=glow?4:3;
+  ctx.beginPath();ctx.ellipse(x,y,r*.75,r,0,0,7);ctx.fill();ctx.stroke();ctx.restore();
+  ctx.fillStyle='rgba(255,255,255,.55)';ctx.beginPath();ctx.ellipse(x-r*.25,y-r*.4,r*.15,r*.25,-.4,0,7);ctx.fill();
+}
+function text(s,x,y,size,col){ctx.font='800 '+size+'px system-ui,sans-serif';ctx.textAlign='center';ctx.lineWidth=4;ctx.strokeStyle='#1c2333';ctx.fillStyle=col||'#fff';ctx.strokeText(s,x,y);ctx.fillText(s,x,y)}
+function draw(){
+  const d=Math.min(2,devicePixelRatio||1), vw=innerWidth, vh=innerHeight;
+  if(cv.width!==vw*d||cv.height!==vh*d){cv.width=vw*d;cv.height=vh*d}
+  const sc=Math.max(Math.min(vw/W,vh/H),.55), cam=(v,p,w)=>v/sc>=w?(w-v/sc)/2:clamp(p-v/sc/2,0,w-v/sc);
+  ctx.setTransform(d,0,0,d,0,0);ctx.fillStyle='#3f8f55';ctx.fillRect(0,0,vw,vh);
+  ctx.setTransform(d*sc,0,0,d*sc,-cam(vw,P.x,W)*d*sc,-cam(vh,P.y,H)*d*sc);
+  ctx.fillStyle='#74c678';ctx.fillRect(0,0,W,H);
+  ctx.fillStyle='#3a4256';ctx.fillRect(0,BY-40,W,80);
+  ctx.fillStyle='#566078';for(let x=(now*60)%60;x<W;x+=60)ctx.fillRect(x,BY-40,6,80);
+  for(const g of belt){egg(g.x,BY,22,g);text('$'+fmt(price(g)),g.x,BY+58,17,P.cash>=price(g)?'#b6ffb0':'#ffb0a8')}
+  for(const b of bases){const o=ents[b.i];
+    ctx.fillStyle='#e9d9b0';ctx.strokeStyle=o.col;ctx.lineWidth=8;ctx.beginPath();ctx.rect(b.cx-BW/2,b.cy-BH/2,BW,BH);ctx.fill();ctx.stroke();
+    text(o.name+' · $'+fmt(income(b))+'/s',b.cx,b.cy+(b.cy<BY?BH/2+28:-BH/2-12),20,o.col);
+    for(let s=0;s<8;s++){const p=slot(b,s);ctx.fillStyle='#c9a56a';ctx.beginPath();ctx.ellipse(p.x,p.y+18,32,12,0,0,7);ctx.fill();if(b.eggs[s])egg(p.x,p.y,22,b.eggs[s])}
+    if(b.i===PI){ctx.fillStyle=b.cd<=0?'#3d8bff':'#8a93a8';ctx.beginPath();ctx.arc(b.pad.x,b.pad.y,38,0,7);ctx.fill();ctx.lineWidth=4;ctx.strokeStyle='#1c2333';ctx.stroke();
+      text(b.shield>0?Math.ceil(b.shield)+'s':b.cd>0?'wait '+Math.ceil(b.cd):'DOME',b.pad.x,b.pad.y+6,16)}
+    if(b.shield>0){ctx.fillStyle='rgba(90,170,255,.3)';ctx.fillRect(b.cx-BW/2-20,b.cy-BH/2-20,BW+40,BH+40);if(b.i!==PI)text('Dome '+Math.ceil(b.shield)+'s',b.cx,b.cy+8,26)}
+  }
+  for(const e of ents.slice().sort((a,b)=>a.y-b.y)){
+    const wob=e.stun>0?Math.sin(now*40)*4:0;
+    ctx.fillStyle=e.col;ctx.strokeStyle='#1c2333';ctx.lineWidth=4;ctx.beginPath();ctx.arc(e.x+wob,e.y,20,0,7);ctx.fill();ctx.stroke();
+    ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(e.x-7+wob,e.y-4,6,0,7);ctx.arc(e.x+7+wob,e.y-4,6,0,7);ctx.fill();
+    ctx.fillStyle='#1c2333';ctx.beginPath();ctx.arc(e.x-6+wob,e.y-3,2.5,0,7);ctx.arc(e.x+8+wob,e.y-3,2.5,0,7);ctx.fill();
+    if(e.carry)egg(e.x,e.y-42,16,e.carry.egg);
+    text(e.name,e.x,e.y-(e.carry?66:30),16);
+    if(now-e.swing<.2){ctx.strokeStyle='#fff';ctx.lineWidth=5;ctx.beginPath();ctx.arc(e.x,e.y,75*(now-e.swing)/.2,0,7);ctx.stroke()}
+    if(e.bot&&e.st==='steal'&&e.t<1.5)ring(slot(e.tb,e.ts),1-e.t/1.5,'#e2504c');
+  }
+  if(grabbing)ring(slot(grabbing.b,grabbing.s),grabbing.t,'#ffd166');
+}
+function ring(p,f,col){ctx.strokeStyle=col;ctx.lineWidth=7;ctx.beginPath();ctx.arc(p.x,p.y,36,-1.57,-1.57+6.283*f);ctx.stroke()}
+function hud(){
+  $('cash').textContent='$'+fmt(P.cash)+'  +$'+fmt(income(bases[PI]))+'/s'+(reb?'  x'+(1+.5*reb):'');
+  const c=context(), a=$('act');
+  a.textContent=grabbing?'Grabbing…':c?c.text:P.carry?'Carry it home':'—'; a.disabled=!c||!c.ok;
+  $('swat').disabled=P.cd>0;
+}
+let last=performance.now();
+function frame(t){const dt=Math.min(.05,(t-last)/1000);last=t;if(!menuOpen)step(dt);draw();hud();requestAnimationFrame(frame)}
+addEventListener('beforeunload',save);
+window.game={P,bases,ents,belt,step,act,context,swat,grab,raise,buyUpg,rebirth,save,slot,get reb(){return reb},get upg(){return upg}};
+if(!localStorage.getItem(KEY))toggleMenu(true);
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
